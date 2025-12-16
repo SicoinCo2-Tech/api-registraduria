@@ -2,7 +2,9 @@ import logging
 import time
 import random
 import atexit
-import os
+import uuid
+import threading
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -14,30 +16,38 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Variables globales
+# Sistema de jobs en memoria
+jobs = {}
+jobs_lock = threading.Lock()
+
+# Playwright globals
 playwright_instance = None
 browser_instance = None
-browser_lock = False
+
+def cleanup_old_jobs():
+    """Limpia jobs antiguos (>10 minutos)"""
+    with jobs_lock:
+        cutoff = datetime.now() - timedelta(minutes=10)
+        to_delete = [
+            job_id for job_id, job in jobs.items()
+            if job.get('created_at', datetime.now()) < cutoff
+        ]
+        for job_id in to_delete:
+            del jobs[job_id]
+            logger.info(f"🗑️ Job {job_id} limpiado")
 
 def init_browser():
-    """Inicializa Playwright y browser de forma lazy"""
-    global playwright_instance, browser_instance, browser_lock
-    
-    if browser_lock:
-        logger.info("Browser inicializándose, esperando...")
-        time.sleep(2)
-        return browser_instance
+    """Inicializa Playwright y browser"""
+    global playwright_instance, browser_instance
     
     try:
         if browser_instance and browser_instance.is_connected():
             return browser_instance
         
-        browser_lock = True
         logger.info("🚀 Iniciando Playwright...")
         
         if playwright_instance is None:
             playwright_instance = sync_playwright().start()
-            logger.info("✅ Playwright started")
         
         browser_instance = playwright_instance.chromium.launch(
             headless=True,
@@ -47,21 +57,17 @@ def init_browser():
                 '--disable-dev-shm-usage',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-features=IsolateOrigins,site-per-process',
             ]
         )
-        logger.info("✅ Browser lanzado exitosamente")
-        browser_lock = False
+        logger.info("✅ Browser iniciado")
         return browser_instance
         
     except Exception as e:
-        browser_lock = False
         logger.error(f"❌ Error iniciando browser: {e}")
         raise
 
 def cleanup():
-    """Limpia recursos al cerrar"""
+    """Limpia recursos"""
     global browser_instance, playwright_instance
     logger.info("🧹 Limpiando recursos...")
     if browser_instance:
@@ -77,140 +83,86 @@ def cleanup():
 
 atexit.register(cleanup)
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check simplificado - no inicia el browser"""
-    return jsonify({
-        "status": "healthy",
-        "service": "Registraduria API",
-        "browser_ready": browser_instance is not None and browser_instance.is_connected(),
-        "timestamp": time.time()
-    }), 200
-
-@app.route('/warmup', methods=['GET'])
-def warmup():
-    """Endpoint para calentar el browser"""
-    try:
-        browser = init_browser()
-        return jsonify({
-            "status": "success",
-            "browser": "ready",
-            "connected": browser.is_connected()
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/consulta_cedula', methods=['POST'])
-def consulta_cedula_api():
-    start_time = time.time()
+def process_cedula_job(job_id, cedula_str):
+    """Procesa una consulta de cédula en background"""
     context = None
     page = None
     
     try:
-        # Validar request
-        data = request.json
-        if not data:
-            return jsonify({"status": "error", "mensaje": "No se envio JSON"}), 400
+        # Actualizar estado
+        with jobs_lock:
+            jobs[job_id]['status'] = 'processing'
+            jobs[job_id]['updated_at'] = datetime.now()
         
-        cedula = data.get('cedula')
-        if not cedula:
-            return jsonify({"status": "error", "mensaje": "Falta cedula"}), 400
+        logger.info(f"📋 Procesando job {job_id}: {cedula_str}")
         
-        cedula_str = str(cedula).strip()
-        if not cedula_str.isdigit():
-            return jsonify({"status": "error", "mensaje": "Cedula debe ser numerica"}), 400
-        
-        if len(cedula_str) < 6 or len(cedula_str) > 10:
-            return jsonify({"status": "error", "mensaje": "Cedula debe tener entre 6 y 10 digitos"}), 400
-        
-        logger.info(f"📋 Consultando cedula: {cedula_str}")
-        
-        # Iniciar browser si no está listo
         browser = init_browser()
         
-        # Crear contexto con stealth
         context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             locale='es-CO',
             timezone_id='America/Bogota',
             viewport={'width': 1920, 'height': 1080},
-            extra_http_headers={
-                'Accept-Language': 'es-CO,es;q=0.9',
-            }
         )
         
-        # Inyectar scripts anti-detección
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
             window.chrome = {runtime: {}};
         """)
         
         page = context.new_page()
-        
-        # Bloquear recursos pesados
         page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2,ttf,ico}", lambda route: route.abort())
         
-        logger.info("🌐 Navegando a Registraduria...")
-        
-        # Navegar
         page.goto(
             'https://wsp.registraduria.gov.co/censo/consultar',
             wait_until='domcontentloaded',
             timeout=25000
         )
         
-        # Esperar formulario
         page.wait_for_selector('input[name="numdoc"]', state='visible', timeout=8000)
         time.sleep(random.uniform(0.5, 1))
         
-        # Llenar formulario
         page.type('input[name="numdoc"]', cedula_str, delay=random.randint(50, 100))
         time.sleep(random.uniform(0.5, 1))
         
-        # Enviar
-        logger.info("📤 Enviando formulario...")
         try:
             with page.expect_navigation(wait_until='domcontentloaded', timeout=30000):
                 page.click('input[type="submit"]')
         except PlaywrightTimeoutError:
-            logger.warning("⚠️ Timeout en navegacion, continuando...")
+            logger.warning("⚠️ Timeout en navegacion")
         
         time.sleep(1.5)
         
-        # Obtener resultados
         html = page.content()
         texto = page.inner_text('body')
         
-        total_time = time.time() - start_time
-        logger.info(f"✅ Completado en {total_time:.2f}s")
-        
-        # Analizar respuesta
         texto_lower = texto.lower()
         html_lower = html.lower()
         
         # Detectar CAPTCHA
-        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot', 'g-recaptcha']):
-            logger.warning("🤖 CAPTCHA detectado")
-            return jsonify({
-                "status": "captcha",
-                "mensaje": "CAPTCHA detectado",
-                "cedula": cedula_str,
-                "tiempo_proceso": round(total_time, 2)
-            }), 200
+        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot']):
+            with jobs_lock:
+                jobs[job_id]['status'] = 'captcha'
+                jobs[job_id]['result'] = {
+                    "status": "captcha",
+                    "mensaje": "CAPTCHA detectado",
+                    "cedula": cedula_str
+                }
+                jobs[job_id]['updated_at'] = datetime.now()
+            return
         
         # Detectar no encontrado
-        if any(phrase in texto_lower for phrase in ['no se encontro', 'no existe', 'no hay']):
-            return jsonify({
-                "status": "not_found",
-                "mensaje": "Cedula no encontrada",
-                "cedula": cedula_str,
-                "tiempo_proceso": round(total_time, 2)
-            }), 200
+        if any(phrase in texto_lower for phrase in ['no se encontro', 'no existe']):
+            with jobs_lock:
+                jobs[job_id]['status'] = 'not_found'
+                jobs[job_id]['result'] = {
+                    "status": "not_found",
+                    "mensaje": "Cedula no encontrada",
+                    "cedula": cedula_str
+                }
+                jobs[job_id]['updated_at'] = datetime.now()
+            return
         
         # Parsear datos
         resultado = {
@@ -223,53 +175,44 @@ def consulta_cedula_api():
             "mesa": None
         }
         
-        try:
-            lineas = texto.split('\n')
-            for i, linea in enumerate(lineas):
-                linea_lower = linea.lower().strip()
-                if 'nombre' in linea_lower and i + 1 < len(lineas):
-                    resultado['nombre'] = lineas[i + 1].strip()
-                elif 'puesto' in linea_lower and i + 1 < len(lineas):
-                    resultado['puesto_votacion'] = lineas[i + 1].strip()
-                elif 'direccion' in linea_lower and i + 1 < len(lineas):
-                    resultado['direccion'] = lineas[i + 1].strip()
-                elif 'municipio' in linea_lower and i + 1 < len(lineas):
-                    resultado['municipio'] = lineas[i + 1].strip()
-                elif 'departamento' in linea_lower and i + 1 < len(lineas):
-                    resultado['departamento'] = lineas[i + 1].strip()
-                elif 'mesa' in linea_lower and i + 1 < len(lineas):
-                    resultado['mesa'] = lineas[i + 1].strip()
-        except Exception as e:
-            logger.warning(f"⚠️ Error parseando: {e}")
+        lineas = texto.split('\n')
+        for i, linea in enumerate(lineas):
+            linea_lower = linea.lower().strip()
+            if 'nombre' in linea_lower and i + 1 < len(lineas):
+                resultado['nombre'] = lineas[i + 1].strip()
+            elif 'puesto' in linea_lower and i + 1 < len(lineas):
+                resultado['puesto_votacion'] = lineas[i + 1].strip()
+            elif 'direccion' in linea_lower and i + 1 < len(lineas):
+                resultado['direccion'] = lineas[i + 1].strip()
+            elif 'municipio' in linea_lower and i + 1 < len(lineas):
+                resultado['municipio'] = lineas[i + 1].strip()
+            elif 'departamento' in linea_lower and i + 1 < len(lineas):
+                resultado['departamento'] = lineas[i + 1].strip()
+            elif 'mesa' in linea_lower and i + 1 < len(lineas):
+                resultado['mesa'] = lineas[i + 1].strip()
         
-        return jsonify({
-            "status": "success",
-            "cedula": cedula_str,
-            "datos_estructurados": resultado,
-            "resultado_bruto": texto,
-            "tiempo_proceso": round(total_time, 2)
-        }), 200
+        # Guardar resultado exitoso
+        with jobs_lock:
+            jobs[job_id]['status'] = 'completed'
+            jobs[job_id]['result'] = {
+                "status": "success",
+                "cedula": cedula_str,
+                "datos": resultado,
+                "texto_completo": texto
+            }
+            jobs[job_id]['updated_at'] = datetime.now()
         
-    except PlaywrightTimeoutError:
-        total_time = time.time() - start_time
-        logger.error("⏱️ Timeout en Playwright")
-        return jsonify({
-            "status": "error",
-            "mensaje": "Timeout al consultar",
-            "error_type": "timeout",
-            "tiempo_transcurrido": round(total_time, 2)
-        }), 504
+        logger.info(f"✅ Job {job_id} completado")
         
     except Exception as e:
-        total_time = time.time() - start_time
-        logger.error(f"❌ Error: {str(e)}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "mensaje": "Error interno",
-            "error_type": "server_error",
-            "error_detail": str(e),
-            "tiempo_transcurrido": round(total_time, 2)
-        }), 500
+        logger.error(f"❌ Error en job {job_id}: {e}")
+        with jobs_lock:
+            jobs[job_id]['status'] = 'error'
+            jobs[job_id]['result'] = {
+                "status": "error",
+                "mensaje": str(e)
+            }
+            jobs[job_id]['updated_at'] = datetime.now()
     
     finally:
         if page:
@@ -283,21 +226,123 @@ def consulta_cedula_api():
             except:
                 pass
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    cleanup_old_jobs()
+    return jsonify({
+        "status": "healthy",
+        "jobs_activos": len(jobs),
+        "timestamp": time.time()
+    }), 200
+
+@app.route('/consulta_cedula', methods=['POST'])
+def consulta_cedula_async():
+    """Crea un job asíncrono y retorna inmediatamente"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "mensaje": "No se envio JSON"}), 400
+        
+        cedula = data.get('cedula')
+        if not cedula:
+            return jsonify({"status": "error", "mensaje": "Falta cedula"}), 400
+        
+        cedula_str = str(cedula).strip()
+        if not cedula_str.isdigit() or len(cedula_str) < 6 or len(cedula_str) > 10:
+            return jsonify({"status": "error", "mensaje": "Cedula invalida"}), 400
+        
+        # Crear job
+        job_id = str(uuid.uuid4())
+        
+        with jobs_lock:
+            jobs[job_id] = {
+                'cedula': cedula_str,
+                'status': 'pending',
+                'result': None,
+                'created_at': datetime.now(),
+                'updated_at': datetime.now()
+            }
+        
+        # Iniciar procesamiento en background
+        thread = threading.Thread(target=process_cedula_job, args=(job_id, cedula_str))
+        thread.daemon = True
+        thread.start()
+        
+        logger.info(f"🆕 Job {job_id} creado para {cedula_str}")
+        
+        # Retornar inmediatamente
+        return jsonify({
+            "status": "accepted",
+            "job_id": job_id,
+            "mensaje": "Consulta iniciada. Use GET /job/{job_id} para ver el estado",
+            "endpoints": {
+                "status": f"/job/{job_id}",
+                "result": f"/job/{job_id}/result"
+            }
+        }), 202
+        
+    except Exception as e:
+        logger.error(f"Error creando job: {e}")
+        return jsonify({"status": "error", "mensaje": str(e)}), 500
+
+@app.route('/job/<job_id>', methods=['GET'])
+def get_job_status(job_id):
+    """Obtiene el estado de un job"""
+    with jobs_lock:
+        job = jobs.get(job_id)
+    
+    if not job:
+        return jsonify({
+            "status": "error",
+            "mensaje": "Job no encontrado o expirado"
+        }), 404
+    
+    return jsonify({
+        "job_id": job_id,
+        "status": job['status'],
+        "cedula": job['cedula'],
+        "created_at": job['created_at'].isoformat(),
+        "updated_at": job['updated_at'].isoformat()
+    }), 200
+
+@app.route('/job/<job_id>/result', methods=['GET'])
+def get_job_result(job_id):
+    """Obtiene el resultado de un job completado"""
+    with jobs_lock:
+        job = jobs.get(job_id)
+    
+    if not job:
+        return jsonify({
+            "status": "error",
+            "mensaje": "Job no encontrado o expirado"
+        }), 404
+    
+    if job['status'] == 'pending' or job['status'] == 'processing':
+        return jsonify({
+            "status": "processing",
+            "mensaje": "Job aun en proceso. Intente nuevamente en unos segundos.",
+            "job_id": job_id
+        }), 202
+    
+    # Retornar resultado (completado, error, captcha, not_found)
+    return jsonify(job['result']), 200
+
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "servicio": "Registraduria API",
-        "version": "4.2",
-        "status": "online",
+        "servicio": "Registraduria API - Async",
+        "version": "5.0",
+        "modo": "asíncrono",
         "endpoints": {
-            "health": "GET /health",
-            "warmup": "GET /warmup",
-            "consulta": "POST /consulta_cedula"
+            "crear_consulta": "POST /consulta_cedula",
+            "estado_job": "GET /job/{job_id}",
+            "resultado_job": "GET /job/{job_id}/result",
+            "health": "GET /health"
         },
         "ejemplo": {
-            "method": "POST",
-            "url": "/consulta_cedula",
-            "body": {"cedula": "12345678"}
+            "paso_1": "POST /consulta_cedula con {cedula: '12345678'}",
+            "paso_2": "Guardar el job_id retornado",
+            "paso_3": "GET /job/{job_id}/result para obtener resultado"
         }
     })
 
