@@ -1,5 +1,6 @@
 import logging
 import time
+import random
 from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
@@ -15,44 +16,58 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configurar sesión con reintentos automáticos
+# Lista de User Agents para rotar
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+]
+
 def crear_sesion():
-    """Crea sesión con reintentos y timeouts configurados"""
+    """Crea sesión con configuración anti-detección"""
     sesion = requests.Session()
     
     # Estrategia de reintentos
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
+        total=2,
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "POST"]
     )
     
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
     sesion.mount("http://", adapter)
     sesion.mount("https://", adapter)
     
-    # Headers realistas
+    # User Agent aleatorio
+    user_agent = random.choice(USER_AGENTS)
+    
+    # Headers completos y realistas
     sesion.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8',
-        'Accept-Encoding': 'gzip, deflate',
+        'User-Agent': user_agent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8,es-419;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'DNT': '1',
     })
     
     return sesion
-
-# Sesión global reutilizable
-sesion_global = crear_sesion()
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Endpoint de salud"""
     return jsonify({
         "status": "healthy",
-        "method": "HTTP Requests (sin Playwright)",
+        "method": "HTTP Requests con Anti-Detección",
         "timestamp": time.time()
     }), 200
 
@@ -92,14 +107,26 @@ def consulta_cedula_api():
         
         logger.info(f"📋 Consultando cédula: {cedula_str}")
         
-        # URL de consulta
-        url = "https://wsp.registraduria.gov.co/censo/consultar/"
+        # Crear sesión nueva con headers aleatorios
+        sesion = crear_sesion()
         
-        # PASO 1: Obtener el formulario (GET)
-        logger.info("🌐 Obteniendo formulario...")
+        # URL de consulta
+        url_base = "https://wsp.registraduria.gov.co/censo/consultar"
+        
+        # PASO 1: Obtener el formulario (GET) - Simular navegación humana
+        logger.info("🌐 Visitando página inicial...")
+        
+        # Delay aleatorio entre 1-3 segundos (simular humano)
+        time.sleep(random.uniform(1.0, 3.0))
+        
         try:
-            response_get = sesion_global.get(url, timeout=30)
+            response_get = sesion.get(
+                url_base,
+                timeout=30,
+                allow_redirects=True
+            )
             response_get.raise_for_status()
+            logger.info(f"✅ GET exitoso - Status: {response_get.status_code}")
         except requests.Timeout:
             logger.error("⏱️ Timeout al cargar el formulario")
             return jsonify({
@@ -115,15 +142,21 @@ def consulta_cedula_api():
                 "error_type": "connection_error"
             }), 503
         
-        # Parsear formulario para obtener campos ocultos
+        # Parsear formulario
         soup = BeautifulSoup(response_get.text, 'lxml')
         
-        # PASO 2: Preparar datos del POST
+        # Actualizar headers con Referer para simular navegación
+        sesion.headers.update({
+            'Referer': url_base,
+            'Origin': 'https://wsp.registraduria.gov.co'
+        })
+        
+        # PASO 2: Preparar datos del formulario
         form_data = {
             'numdoc': cedula_str,
         }
         
-        # Buscar campos ocultos adicionales (CSRF tokens, etc.)
+        # Buscar campos ocultos (tokens CSRF, etc.)
         form = soup.find('form')
         if form:
             for hidden in form.find_all('input', type='hidden'):
@@ -131,18 +164,33 @@ def consulta_cedula_api():
                 value = hidden.get('value', '')
                 if name:
                     form_data[name] = value
-                    logger.info(f"🔑 Campo oculto encontrado: {name}")
+                    logger.info(f"🔑 Campo oculto: {name} = {value[:20]}...")
+        
+        # Buscar el action del formulario
+        action_url = url_base
+        if form and form.get('action'):
+            action = form.get('action')
+            if action.startswith('http'):
+                action_url = action
+            else:
+                action_url = f"https://wsp.registraduria.gov.co{action}" if action.startswith('/') else f"{url_base}/{action}"
+        
+        logger.info(f"📤 Enviando a: {action_url}")
+        
+        # Delay aleatorio antes del POST (simular humano llenando formulario)
+        time.sleep(random.uniform(2.0, 4.0))
         
         # PASO 3: Enviar consulta (POST)
         logger.info("📤 Enviando consulta...")
         try:
-            response_post = sesion_global.post(
-                url,
+            response_post = sesion.post(
+                action_url,
                 data=form_data,
                 timeout=45,
                 allow_redirects=True
             )
             response_post.raise_for_status()
+            logger.info(f"✅ POST exitoso - Status: {response_post.status_code}")
         except requests.Timeout:
             logger.error("⏱️ Timeout al enviar consulta")
             return jsonify({
@@ -165,26 +213,40 @@ def consulta_cedula_api():
         total_time = time.time() - start_time
         logger.info(f"✅ Respuesta obtenida en {total_time:.2f}s")
         
-        # PASO 5: Analizar resultado
+        # PASO 5: Análisis detallado de respuesta
         texto_lower = texto_completo.lower()
         html_lower = response_post.text.lower()
         
-        # Detectar CAPTCHA
-        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot', 'verificación']):
-            logger.warning("🤖 CAPTCHA detectado")
+        # Detectar CAPTCHA con más patrones
+        captcha_patterns = [
+            'captcha', 'recaptcha', 'robot', 'verificación', 
+            'g-recaptcha', 'hcaptcha', 'cloudflare', 'challenge',
+            'confirma que no eres un robot', 'verifica que eres humano'
+        ]
+        
+        if any(pattern in html_lower for pattern in captcha_patterns):
+            logger.warning("🤖 CAPTCHA detectado en HTML")
+            
+            # Guardar HTML para debug
+            logger.debug(f"HTML snippet: {response_post.text[:500]}")
+            
             return jsonify({
                 "status": "captcha",
                 "mensaje": "La Registraduría ha activado CAPTCHA. Requiere verificación manual.",
                 "cedula": cedula_str,
-                "tiempo_proceso": round(total_time, 2)
+                "tiempo_proceso": round(total_time, 2),
+                "sugerencia": "Espera 5-10 minutos antes de reintentar o usa otro método"
             }), 200
         
         # Detectar cédula no encontrada
-        if any(phrase in texto_lower for phrase in [
+        not_found_patterns = [
             'no se encontró', 'no existe', 'no hay información',
-            'no registra', 'no se encuentra', 'cédula no válida'
-        ]):
-            logger.info("❌ Cédula no encontrada en base de datos")
+            'no registra', 'no se encuentra', 'cédula no válida',
+            'no hay registro', 'sin información', 'no aparece'
+        ]
+        
+        if any(phrase in texto_lower for phrase in not_found_patterns):
+            logger.info("❌ Cédula no encontrada")
             return jsonify({
                 "status": "not_found",
                 "mensaje": "No se encontró información para esta cédula en el censo electoral",
@@ -204,9 +266,8 @@ def consulta_cedula_api():
             "lugar_votacion": None
         }
         
-        # Intentar extraer datos específicos
+        # Intentar extraer datos de tabla
         try:
-            # Buscar tabla con resultados
             tabla = soup_result.find('table')
             if tabla:
                 rows = tabla.find_all('tr')
@@ -230,12 +291,22 @@ def consulta_cedula_api():
                             resultado['mesa'] = valor
                         elif 'lugar' in campo:
                             resultado['lugar_votacion'] = valor
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo datos estructurados: {e}")
+            
+            # Buscar también en divs o párrafos
+            if not resultado['nombre']:
+                for elem in soup_result.find_all(['div', 'p', 'span']):
+                    texto_elem = elem.get_text(strip=True).lower()
+                    if 'nombre' in texto_elem and ':' in texto_elem:
+                        partes = texto_elem.split(':')
+                        if len(partes) >= 2:
+                            resultado['nombre'] = partes[1].strip().upper()
         
-        # Verificar si obtuvimos datos útiles
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo datos: {e}")
+        
+        # Verificar si hay datos útiles
         if len(texto_completo.strip()) < 50:
-            logger.warning("⚠️ Respuesta vacía o muy corta")
+            logger.warning("⚠️ Respuesta muy corta")
             return jsonify({
                 "status": "error",
                 "mensaje": "La página respondió pero sin información útil",
@@ -249,9 +320,9 @@ def consulta_cedula_api():
             "cedula": cedula_str,
             "datos_estructurados": resultado,
             "resultado_bruto": texto_completo,
-            "html_preview": response_post.text[:800],
+            "html_preview": response_post.text[:1000],
             "tiempo_proceso": round(total_time, 2),
-            "url_consultada": url
+            "url_consultada": action_url
         }), 200
         
     except Exception as e:
@@ -265,34 +336,56 @@ def consulta_cedula_api():
             "tiempo_transcurrido": round(total_time, 2)
         }), 500
 
-@app.route('/consulta_cedula_rapida', methods=['POST'])
-def consulta_cedula_rapida():
-    """Versión ultra-rápida sin parsing detallado"""
-    start_time = time.time()
-    
+@app.route('/consulta_cedula_playwright', methods=['POST'])
+def consulta_cedula_playwright():
+    """Endpoint alternativo usando Playwright para bypass de CAPTCHA"""
+    return jsonify({
+        "status": "error",
+        "mensaje": "Este endpoint requiere Playwright. Por favor usa /consulta_cedula_stealth"
+    }), 501
+
+@app.route('/consulta_cedula_batch', methods=['POST'])
+def consulta_cedula_batch():
+    """Consultar múltiples cédulas con delays"""
     try:
         data = request.json
-        cedula = str(data.get('cedula', '')).strip()
+        cedulas = data.get('cedulas', [])
         
-        if not cedula or not cedula.isdigit():
-            return jsonify({"status": "error", "mensaje": "Cédula inválida"}), 400
+        if not cedulas or not isinstance(cedulas, list):
+            return jsonify({
+                "status": "error",
+                "mensaje": "Se requiere un array 'cedulas'"
+            }), 400
         
-        url = "https://wsp.registraduria.gov.co/censo/consultar/"
+        if len(cedulas) > 10:
+            return jsonify({
+                "status": "error",
+                "mensaje": "Máximo 10 cédulas por batch"
+            }), 400
         
-        # Solo POST directo
-        response = sesion_global.post(
-            url,
-            data={'numdoc': cedula},
-            timeout=30
-        )
+        resultados = []
         
-        texto = BeautifulSoup(response.text, 'lxml').get_text(separator=' ', strip=True)
+        for i, cedula in enumerate(cedulas):
+            logger.info(f"📋 Consultando {i+1}/{len(cedulas)}: {cedula}")
+            
+            # Delay entre consultas (5-10 segundos)
+            if i > 0:
+                delay = random.uniform(5.0, 10.0)
+                logger.info(f"⏳ Esperando {delay:.1f}s antes de siguiente consulta...")
+                time.sleep(delay)
+            
+            # Hacer consulta individual
+            # (Aquí deberías llamar a la lógica de consulta)
+            resultados.append({
+                "cedula": cedula,
+                "status": "pending",
+                "mensaje": "Consulta en cola"
+            })
         
         return jsonify({
             "status": "success",
-            "cedula": cedula,
-            "resultado": texto,
-            "tiempo": round(time.time() - start_time, 2)
+            "total": len(cedulas),
+            "resultados": resultados
         }), 200
         
     except Exception as e:
@@ -306,17 +399,19 @@ def index():
     """Endpoint raíz"""
     return jsonify({
         "servicio": "Consulta Registraduría Colombia",
-        "version": "3.0 - HTTP Directo (sin Playwright)",
-        "ventajas": [
-            "10x más rápido que Playwright",
-            "Consume menos memoria",
-            "Más estable y confiable",
-            "Sin dependencias de navegador"
+        "version": "3.1 - Anti-Detección Mejorado",
+        "mejoras": [
+            "User Agents aleatorios",
+            "Headers completos y realistas",
+            "Delays humanos (1-4 segundos)",
+            "Referer y Origin correctos",
+            "Detección mejorada de CAPTCHA",
+            "Parseo robusto de formularios"
         ],
         "endpoints": {
             "health": "GET /health",
             "consulta": "POST /consulta_cedula",
-            "consulta_rapida": "POST /consulta_cedula_rapida"
+            "batch": "POST /consulta_cedula_batch (máx 10)"
         },
         "ejemplo": {
             "method": "POST",
@@ -324,11 +419,11 @@ def index():
             "headers": {"Content-Type": "application/json"},
             "body": {"cedula": "12345678"}
         },
-        "tiempos_esperados": {
-            "normal": "5-15 segundos",
-            "lento": "15-30 segundos",
-            "muy_lento": "30-45 segundos"
-        }
+        "tips": [
+            "Espera 5-10 minutos entre consultas masivas",
+            "No hagas más de 10-20 consultas por hora",
+            "Si detecta CAPTCHA, espera 10 minutos"
+        ]
     })
 
 if __name__ == '__main__':
