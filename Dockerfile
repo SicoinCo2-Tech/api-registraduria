@@ -1,36 +1,27 @@
-FROM python:3.11-slim
+FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
 
 WORKDIR /app
 
-# Instalar dependencias del sistema
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copiar e instalar requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar aplicacion
 COPY app.py .
 
-# Variables de entorno
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PYTHONUNBUFFERED=1
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD python -c "import requests; requests.get('http://localhost:10000/health', timeout=5)" || exit 1
+HEALTHCHECK --interval=60s --timeout=30s --start-period=90s --retries=2 \
+  CMD python -c "import requests; requests.get('http://localhost:10000/health', timeout=10)" || exit 1
 
-# Comando Gunicorn optimizado
 CMD ["gunicorn", "app:app", \
      "--bind", "0.0.0.0:10000", \
-     "--workers", "2", \
-     "--threads", "4", \
-     "--timeout", "90", \
-     "--graceful-timeout", "90", \
+     "--workers", "1", \
+     "--threads", "1", \
+     "--timeout", "150", \
+     "--graceful-timeout", "150", \
      "--keep-alive", "120", \
-     "--worker-class", "sync", \
      "--preload", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
      "--log-level", "info"]
