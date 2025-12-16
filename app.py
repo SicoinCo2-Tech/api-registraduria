@@ -1,6 +1,7 @@
 import logging
 import time
 import random
+import atexit
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -18,41 +19,59 @@ browser_instance = None
 def get_browser():
     global playwright_instance, browser_instance
     
-    if browser_instance is None or not browser_instance.is_connected():
-        logger.info("Iniciando Playwright con stealth...")
-        if playwright_instance is None:
-            playwright_instance = sync_playwright().start()
-        
-        browser_instance = playwright_instance.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-site-isolation-trials',
-            ]
-        )
-    return browser_instance
+    try:
+        if browser_instance is None or not browser_instance.is_connected():
+            logger.info("Iniciando Playwright...")
+            if playwright_instance is None:
+                playwright_instance = sync_playwright().start()
+            
+            browser_instance = playwright_instance.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-site-isolation-trials',
+                ]
+            )
+            logger.info("Browser iniciado exitosamente")
+        return browser_instance
+    except Exception as e:
+        logger.error(f"Error iniciando browser: {e}")
+        raise
 
-try:
-    get_browser()
-    logger.info("Browser pre-calentado exitosamente")
-except Exception as e:
-    logger.error(f"Error pre-calentando browser: {e}")
+def cleanup():
+    global browser_instance, playwright_instance
+    logger.info("Limpiando recursos...")
+    if browser_instance:
+        try:
+            browser_instance.close()
+        except:
+            pass
+    if playwright_instance:
+        try:
+            playwright_instance.stop()
+        except:
+            pass
+
+atexit.register(cleanup)
 
 @app.route('/health', methods=['GET'])
 def health_check():
     try:
-        browser_status = "connected" if browser_instance and browser_instance.is_connected() else "disconnected"
+        # Intentar obtener el browser para verificar que funciona
+        browser = get_browser()
+        browser_status = "connected" if browser and browser.is_connected() else "disconnected"
         return jsonify({
             "status": "healthy",
-            "method": "Playwright Stealth",
+            "method": "Playwright",
             "browser": browser_status,
             "timestamp": time.time()
         }), 200
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 @app.route('/consulta_cedula', methods=['POST'])
@@ -236,8 +255,8 @@ def consulta_cedula_api():
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "servicio": "Registraduria - Playwright Stealth",
-        "version": "4.0",
+        "servicio": "Registraduria - Playwright",
+        "version": "4.1",
         "features": [
             "Anti-deteccion avanzada",
             "Scripts stealth inyectados",
