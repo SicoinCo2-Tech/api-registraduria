@@ -2,6 +2,7 @@ import logging
 import time
 import random
 import atexit
+import os
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -13,38 +14,56 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Variables globales
 playwright_instance = None
 browser_instance = None
+browser_lock = False
 
-def get_browser():
-    global playwright_instance, browser_instance
+def init_browser():
+    """Inicializa Playwright y browser de forma lazy"""
+    global playwright_instance, browser_instance, browser_lock
+    
+    if browser_lock:
+        logger.info("Browser inicializándose, esperando...")
+        time.sleep(2)
+        return browser_instance
     
     try:
-        if browser_instance is None or not browser_instance.is_connected():
-            logger.info("Iniciando Playwright...")
-            if playwright_instance is None:
-                playwright_instance = sync_playwright().start()
-            
-            browser_instance = playwright_instance.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--disable-site-isolation-trials',
-                ]
-            )
-            logger.info("Browser iniciado exitosamente")
+        if browser_instance and browser_instance.is_connected():
+            return browser_instance
+        
+        browser_lock = True
+        logger.info("🚀 Iniciando Playwright...")
+        
+        if playwright_instance is None:
+            playwright_instance = sync_playwright().start()
+            logger.info("✅ Playwright started")
+        
+        browser_instance = playwright_instance.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-features=IsolateOrigins,site-per-process',
+            ]
+        )
+        logger.info("✅ Browser lanzado exitosamente")
+        browser_lock = False
         return browser_instance
+        
     except Exception as e:
-        logger.error(f"Error iniciando browser: {e}")
+        browser_lock = False
+        logger.error(f"❌ Error iniciando browser: {e}")
         raise
 
 def cleanup():
+    """Limpia recursos al cerrar"""
     global browser_instance, playwright_instance
-    logger.info("Limpiando recursos...")
+    logger.info("🧹 Limpiando recursos...")
     if browser_instance:
         try:
             browser_instance.close()
@@ -60,19 +79,29 @@ atexit.register(cleanup)
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    """Health check simplificado - no inicia el browser"""
+    return jsonify({
+        "status": "healthy",
+        "service": "Registraduria API",
+        "browser_ready": browser_instance is not None and browser_instance.is_connected(),
+        "timestamp": time.time()
+    }), 200
+
+@app.route('/warmup', methods=['GET'])
+def warmup():
+    """Endpoint para calentar el browser"""
     try:
-        # Intentar obtener el browser para verificar que funciona
-        browser = get_browser()
-        browser_status = "connected" if browser and browser.is_connected() else "disconnected"
+        browser = init_browser()
         return jsonify({
-            "status": "healthy",
-            "method": "Playwright",
-            "browser": browser_status,
-            "timestamp": time.time()
+            "status": "success",
+            "browser": "ready",
+            "connected": browser.is_connected()
         }), 200
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 @app.route('/consulta_cedula', methods=['POST'])
 def consulta_cedula_api():
@@ -81,6 +110,7 @@ def consulta_cedula_api():
     page = None
     
     try:
+        # Validar request
         data = request.json
         if not data:
             return jsonify({"status": "error", "mensaje": "No se envio JSON"}), 400
@@ -96,77 +126,76 @@ def consulta_cedula_api():
         if len(cedula_str) < 6 or len(cedula_str) > 10:
             return jsonify({"status": "error", "mensaje": "Cedula debe tener entre 6 y 10 digitos"}), 400
         
-        logger.info(f"Consultando cedula: {cedula_str}")
+        logger.info(f"📋 Consultando cedula: {cedula_str}")
         
-        browser = get_browser()
+        # Iniciar browser si no está listo
+        browser = init_browser()
         
+        # Crear contexto con stealth
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             locale='es-CO',
             timezone_id='America/Bogota',
             viewport={'width': 1920, 'height': 1080},
-            java_script_enabled=True,
             extra_http_headers={
                 'Accept-Language': 'es-CO,es;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             }
         )
         
+        # Inyectar scripts anti-detección
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en']});
+            Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es']});
             window.chrome = {runtime: {}};
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({state: Notification.permission}) :
-                    originalQuery(parameters)
-            );
         """)
         
         page = context.new_page()
         
+        # Bloquear recursos pesados
         page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2,ttf,ico}", lambda route: route.abort())
         
-        logger.info("Navegando a Registraduria...")
+        logger.info("🌐 Navegando a Registraduria...")
         
-        time.sleep(random.uniform(1, 2))
-        
+        # Navegar
         page.goto(
             'https://wsp.registraduria.gov.co/censo/consultar',
             wait_until='domcontentloaded',
-            timeout=30000
+            timeout=25000
         )
         
-        page.wait_for_selector('input[name="numdoc"]', state='visible', timeout=10000)
+        # Esperar formulario
+        page.wait_for_selector('input[name="numdoc"]', state='visible', timeout=8000)
+        time.sleep(random.uniform(0.5, 1))
         
-        time.sleep(random.uniform(1, 2))
+        # Llenar formulario
+        page.type('input[name="numdoc"]', cedula_str, delay=random.randint(50, 100))
+        time.sleep(random.uniform(0.5, 1))
         
-        page.type('input[name="numdoc"]', cedula_str, delay=random.randint(50, 150))
-        
-        time.sleep(random.uniform(1, 2))
-        
-        logger.info("Enviando formulario...")
+        # Enviar
+        logger.info("📤 Enviando formulario...")
         try:
-            with page.expect_navigation(wait_until='domcontentloaded', timeout=40000):
+            with page.expect_navigation(wait_until='domcontentloaded', timeout=30000):
                 page.click('input[type="submit"]')
         except PlaywrightTimeoutError:
-            logger.warning("Timeout en navegacion, continuando...")
+            logger.warning("⚠️ Timeout en navegacion, continuando...")
         
-        time.sleep(2)
+        time.sleep(1.5)
         
+        # Obtener resultados
         html = page.content()
         texto = page.inner_text('body')
         
         total_time = time.time() - start_time
-        logger.info(f"Completado en {total_time:.2f}s")
+        logger.info(f"✅ Completado en {total_time:.2f}s")
         
+        # Analizar respuesta
         texto_lower = texto.lower()
         html_lower = html.lower()
         
-        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot', 'g-recaptcha', 'hcaptcha']):
-            logger.warning("CAPTCHA detectado")
+        # Detectar CAPTCHA
+        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot', 'g-recaptcha']):
+            logger.warning("🤖 CAPTCHA detectado")
             return jsonify({
                 "status": "captcha",
                 "mensaje": "CAPTCHA detectado",
@@ -174,6 +203,7 @@ def consulta_cedula_api():
                 "tiempo_proceso": round(total_time, 2)
             }), 200
         
+        # Detectar no encontrado
         if any(phrase in texto_lower for phrase in ['no se encontro', 'no existe', 'no hay']):
             return jsonify({
                 "status": "not_found",
@@ -182,6 +212,7 @@ def consulta_cedula_api():
                 "tiempo_proceso": round(total_time, 2)
             }), 200
         
+        # Parsear datos
         resultado = {
             "nombre": None,
             "cedula": cedula_str,
@@ -209,7 +240,7 @@ def consulta_cedula_api():
                 elif 'mesa' in linea_lower and i + 1 < len(lineas):
                     resultado['mesa'] = lineas[i + 1].strip()
         except Exception as e:
-            logger.warning(f"Error parseando: {e}")
+            logger.warning(f"⚠️ Error parseando: {e}")
         
         return jsonify({
             "status": "success",
@@ -221,7 +252,7 @@ def consulta_cedula_api():
         
     except PlaywrightTimeoutError:
         total_time = time.time() - start_time
-        logger.error("Timeout en Playwright")
+        logger.error("⏱️ Timeout en Playwright")
         return jsonify({
             "status": "error",
             "mensaje": "Timeout al consultar",
@@ -231,7 +262,7 @@ def consulta_cedula_api():
         
     except Exception as e:
         total_time = time.time() - start_time
-        logger.error(f"Error: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
             "mensaje": "Error interno",
@@ -255,16 +286,12 @@ def consulta_cedula_api():
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "servicio": "Registraduria - Playwright",
-        "version": "4.1",
-        "features": [
-            "Anti-deteccion avanzada",
-            "Scripts stealth inyectados",
-            "Delays humanos aleatorios",
-            "Bloqueo de recursos innecesarios"
-        ],
+        "servicio": "Registraduria API",
+        "version": "4.2",
+        "status": "online",
         "endpoints": {
             "health": "GET /health",
+            "warmup": "GET /warmup",
             "consulta": "POST /consulta_cedula"
         },
         "ejemplo": {
