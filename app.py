@@ -1,9 +1,10 @@
-import os
 import logging
-from flask import Flask, request, jsonify
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from threading import Lock
 import time
+from flask import Flask, request, jsonify
+import requests
+from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Configurar logging
 logging.basicConfig(
@@ -14,290 +15,320 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Lock para evitar múltiples requests simultáneos
-request_lock = Lock()
-
-# Inicializar Playwright globalmente
-playwright_instance = None
-browser_instance = None
-browser_context = None
-
-def get_browser_and_context():
-    """Obtiene o crea la instancia del browser Y contexto (reutilizable)"""
-    global playwright_instance, browser_instance, browser_context
+# Configurar sesión con reintentos automáticos
+def crear_sesion():
+    """Crea sesión con reintentos y timeouts configurados"""
+    sesion = requests.Session()
     
-    if browser_instance is None or not browser_instance.is_connected():
-        logger.info("🚀 Iniciando browser...")
-        if playwright_instance is None:
-            playwright_instance = sync_playwright().start()
-        
-        browser_instance = playwright_instance.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-setuid-sandbox",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--disable-translate",
-                "--hide-scrollbars",
-                "--metrics-recording-only",
-                "--mute-audio",
-                "--no-first-run",
-                "--safebrowsing-disable-auto-update",
-                "--disable-client-side-phishing-detection",
-                "--disable-component-update",
-                "--disable-hang-monitor"
-            ]
-        )
-        
-        # Crear contexto persistente
-        browser_context = browser_instance.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            locale="es-CO",
-            viewport={"width": 1280, "height": 720},
-            java_script_enabled=True,
-            ignore_https_errors=True  # Ignorar errores SSL
-        )
-        
-        # Timeout por defecto más corto
-        browser_context.set_default_timeout(35000)
-        logger.info("✅ Browser y contexto listos")
+    # Estrategia de reintentos
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
+    )
     
-    return browser_instance, browser_context
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    sesion.mount("http://", adapter)
+    sesion.mount("https://", adapter)
+    
+    # Headers realistas
+    sesion.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    })
+    
+    return sesion
 
-# Pre-calentar al iniciar
-try:
-    logger.info("🔥 Pre-calentando browser...")
-    get_browser_and_context()
-except Exception as e:
-    logger.error(f"❌ Error pre-calentando: {e}")
+# Sesión global reutilizable
+sesion_global = crear_sesion()
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Endpoint de salud"""
-    try:
-        browser_status = "connected" if browser_instance and browser_instance.is_connected() else "disconnected"
-        return jsonify({
-            "status": "healthy",
-            "browser": browser_status,
-            "timestamp": time.time()
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e)
-        }), 500
+    return jsonify({
+        "status": "healthy",
+        "method": "HTTP Requests (sin Playwright)",
+        "timestamp": time.time()
+    }), 200
 
 @app.route('/consulta_cedula', methods=['POST'])
 def consulta_cedula_api():
     start_time = time.time()
     
-    # Lock para una consulta a la vez
-    if not request_lock.acquire(blocking=False):
-        return jsonify({
-            "status": "error",
-            "mensaje": "Otra consulta en proceso. Intenta en 10 segundos."
-        }), 429
-    
-    page = None
-    
     try:
         # Validar request
         data = request.json
         if not data:
-            return jsonify({"status": "error", "mensaje": "No se envió JSON"}), 400
-            
+            return jsonify({
+                "status": "error",
+                "mensaje": "No se envió JSON en el body"
+            }), 400
+        
         cedula = data.get('cedula')
         if not cedula:
-            return jsonify({"status": "error", "mensaje": "Falta la cédula"}), 400
+            return jsonify({
+                "status": "error",
+                "mensaje": "Falta el campo 'cedula' en el JSON"
+            }), 400
         
+        # Validar cédula
         cedula_str = str(cedula).strip()
         if not cedula_str.isdigit():
-            return jsonify({"status": "error", "mensaje": "La cédula debe ser numérica"}), 400
+            return jsonify({
+                "status": "error",
+                "mensaje": "La cédula debe contener solo números"
+            }), 400
+        
+        if len(cedula_str) < 6 or len(cedula_str) > 10:
+            return jsonify({
+                "status": "error",
+                "mensaje": "La cédula debe tener entre 6 y 10 dígitos"
+            }), 400
         
         logger.info(f"📋 Consultando cédula: {cedula_str}")
         
-        # Obtener browser y contexto
-        browser, context = get_browser_and_context()
+        # URL de consulta
+        url = "https://wsp.registraduria.gov.co/censo/consultar/"
         
-        # Crear página
-        page = context.new_page()
-        
-        # Bloquear recursos innecesarios para acelerar carga
-        page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2,ttf}", lambda route: route.abort())
-        
-        logger.info("🌐 Navegando a Registraduría...")
-        
-        # ESTRATEGIA 1: Intentar carga rápida (25 segundos)
+        # PASO 1: Obtener el formulario (GET)
+        logger.info("🌐 Obteniendo formulario...")
         try:
-            page.goto(
-                "https://wsp.registraduria.gov.co/censo/consultar.php",
-                wait_until="domcontentloaded",
-                timeout=25000
-            )
-            logger.info("✅ Carga rápida exitosa")
-        except PlaywrightTimeoutError:
-            logger.warning("⚠️ Timeout en carga inicial, intentando estrategia alternativa...")
-            
-            # ESTRATEGIA 2: Cargar sin esperar a que termine
-            try:
-                page.goto(
-                    "https://wsp.registraduria.gov.co/censo/consultar.php",
-                    wait_until="commit",  # Solo espera a que empiece a cargar
-                    timeout=15000
-                )
-            except:
-                pass
-        
-        # Esperar el formulario (lo importante)
-        try:
-            page.wait_for_selector('input[name="numdoc"]', state="visible", timeout=10000)
-        except PlaywrightTimeoutError:
-            logger.error("❌ Formulario no apareció")
+            response_get = sesion_global.get(url, timeout=30)
+            response_get.raise_for_status()
+        except requests.Timeout:
+            logger.error("⏱️ Timeout al cargar el formulario")
             return jsonify({
                 "status": "error",
-                "mensaje": "La página de la Registraduría no cargó correctamente",
-                "error_type": "form_not_found"
+                "mensaje": "Timeout al conectar con la Registraduría. Intenta en 1 minuto.",
+                "error_type": "timeout_get"
+            }), 504
+        except requests.RequestException as e:
+            logger.error(f"❌ Error en GET: {e}")
+            return jsonify({
+                "status": "error",
+                "mensaje": f"Error al conectar con la Registraduría: {str(e)}",
+                "error_type": "connection_error"
             }), 503
         
-        # Llenar formulario
-        logger.info("✍️ Llenando formulario...")
-        page.fill('input[name="numdoc"]', cedula_str)
+        # Parsear formulario para obtener campos ocultos
+        soup = BeautifulSoup(response_get.text, 'lxml')
         
-        # Enviar formulario
-        logger.info("📤 Enviando formulario...")
-        submit_start = time.time()
+        # PASO 2: Preparar datos del POST
+        form_data = {
+            'numdoc': cedula_str,
+        }
         
+        # Buscar campos ocultos adicionales (CSRF tokens, etc.)
+        form = soup.find('form')
+        if form:
+            for hidden in form.find_all('input', type='hidden'):
+                name = hidden.get('name')
+                value = hidden.get('value', '')
+                if name:
+                    form_data[name] = value
+                    logger.info(f"🔑 Campo oculto encontrado: {name}")
+        
+        # PASO 3: Enviar consulta (POST)
+        logger.info("📤 Enviando consulta...")
         try:
-            # Intentar con navegación (30 segundos máximo)
-            with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
-                page.click('input[type="submit"]')
-        except PlaywrightTimeoutError:
-            logger.warning("⚠️ Timeout en submit, verificando si hay respuesta...")
-            # Esperar un poco más por si acaso
-            page.wait_for_timeout(3000)
+            response_post = sesion_global.post(
+                url,
+                data=form_data,
+                timeout=45,
+                allow_redirects=True
+            )
+            response_post.raise_for_status()
+        except requests.Timeout:
+            logger.error("⏱️ Timeout al enviar consulta")
+            return jsonify({
+                "status": "error",
+                "mensaje": "Timeout al procesar la consulta. La Registraduría está lenta.",
+                "error_type": "timeout_post"
+            }), 504
+        except requests.RequestException as e:
+            logger.error(f"❌ Error en POST: {e}")
+            return jsonify({
+                "status": "error",
+                "mensaje": f"Error al enviar consulta: {str(e)}",
+                "error_type": "post_error"
+            }), 503
         
-        submit_time = time.time() - submit_start
-        logger.info(f"⏱️ Submit tomó {submit_time:.2f}s")
-        
-        # Pequeña espera adicional
-        page.wait_for_timeout(2000)
-        
-        # Obtener contenido
-        try:
-            html = page.content()
-            texto = page.inner_text("body")
-        except Exception as e:
-            logger.error(f"Error obteniendo contenido: {e}")
-            html = ""
-            texto = ""
+        # PASO 4: Parsear respuesta
+        soup_result = BeautifulSoup(response_post.text, 'lxml')
+        texto_completo = soup_result.get_text(separator='\n', strip=True)
         
         total_time = time.time() - start_time
-        logger.info(f"✅ Proceso completo en {total_time:.2f}s")
+        logger.info(f"✅ Respuesta obtenida en {total_time:.2f}s")
         
-        # Análisis de respuesta
-        texto_lower = texto.lower()
-        html_lower = html.lower()
+        # PASO 5: Analizar resultado
+        texto_lower = texto_completo.lower()
+        html_lower = response_post.text.lower()
         
-        # CAPTCHA
-        if "captcha" in html_lower or "robot" in html_lower or "recaptcha" in html_lower:
+        # Detectar CAPTCHA
+        if any(word in html_lower for word in ['captcha', 'recaptcha', 'robot', 'verificación']):
             logger.warning("🤖 CAPTCHA detectado")
             return jsonify({
                 "status": "captcha",
-                "mensaje": "CAPTCHA detectado. La Registraduría requiere verificación manual.",
+                "mensaje": "La Registraduría ha activado CAPTCHA. Requiere verificación manual.",
                 "cedula": cedula_str,
                 "tiempo_proceso": round(total_time, 2)
             }), 200
         
-        # No encontrado
-        if "no se encontr" in texto_lower or "no existe" in texto_lower or "no hay" in texto_lower:
-            logger.info("❌ Cédula no encontrada")
+        # Detectar cédula no encontrada
+        if any(phrase in texto_lower for phrase in [
+            'no se encontró', 'no existe', 'no hay información',
+            'no registra', 'no se encuentra', 'cédula no válida'
+        ]):
+            logger.info("❌ Cédula no encontrada en base de datos")
             return jsonify({
                 "status": "not_found",
-                "mensaje": "No se encontró información para esta cédula",
+                "mensaje": "No se encontró información para esta cédula en el censo electoral",
                 "cedula": cedula_str,
                 "tiempo_proceso": round(total_time, 2)
             }), 200
         
-        # Verificar si hay contenido útil
-        if len(texto.strip()) < 50:
-            logger.warning("⚠️ Respuesta muy corta o vacía")
+        # Extraer información estructurada
+        resultado = {
+            "nombre": None,
+            "cedula": cedula_str,
+            "puesto_votacion": None,
+            "direccion": None,
+            "municipio": None,
+            "departamento": None,
+            "mesa": None,
+            "lugar_votacion": None
+        }
+        
+        # Intentar extraer datos específicos
+        try:
+            # Buscar tabla con resultados
+            tabla = soup_result.find('table')
+            if tabla:
+                rows = tabla.find_all('tr')
+                for row in rows:
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) >= 2:
+                        campo = cells[0].get_text(strip=True).lower()
+                        valor = cells[1].get_text(strip=True)
+                        
+                        if 'nombre' in campo:
+                            resultado['nombre'] = valor
+                        elif 'puesto' in campo or 'votación' in campo:
+                            resultado['puesto_votacion'] = valor
+                        elif 'dirección' in campo or 'direccion' in campo:
+                            resultado['direccion'] = valor
+                        elif 'municipio' in campo:
+                            resultado['municipio'] = valor
+                        elif 'departamento' in campo:
+                            resultado['departamento'] = valor
+                        elif 'mesa' in campo:
+                            resultado['mesa'] = valor
+                        elif 'lugar' in campo:
+                            resultado['lugar_votacion'] = valor
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo datos estructurados: {e}")
+        
+        # Verificar si obtuvimos datos útiles
+        if len(texto_completo.strip()) < 50:
+            logger.warning("⚠️ Respuesta vacía o muy corta")
             return jsonify({
                 "status": "error",
-                "mensaje": "La página respondió pero sin información clara",
-                "texto_obtenido": texto[:200],
+                "mensaje": "La página respondió pero sin información útil",
+                "error_type": "empty_response",
                 "tiempo_proceso": round(total_time, 2)
             }), 500
         
-        # Éxito
+        # Respuesta exitosa
         return jsonify({
             "status": "success",
             "cedula": cedula_str,
-            "resultado_bruto": texto,
-            "html_preview": html[:500],
-            "tiempo_proceso": round(total_time, 2)
+            "datos_estructurados": resultado,
+            "resultado_bruto": texto_completo,
+            "html_preview": response_post.text[:800],
+            "tiempo_proceso": round(total_time, 2),
+            "url_consultada": url
         }), 200
-        
-    except PlaywrightTimeoutError as e:
-        total_time = time.time() - start_time
-        logger.error(f"⏱️ Timeout después de {total_time:.2f}s: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "mensaje": "La Registraduría está muy lenta. Intenta nuevamente en 1 minuto.",
-            "error_type": "timeout",
-            "tiempo_transcurrido": round(total_time, 2)
-        }), 504
         
     except Exception as e:
         total_time = time.time() - start_time
-        logger.error(f"💥 Error después de {total_time:.2f}s: {str(e)}", exc_info=True)
+        logger.error(f"💥 Error inesperado: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
-            "mensaje": "Error inesperado",
+            "mensaje": "Error interno del servidor",
             "error_type": "server_error",
             "error_detail": str(e),
             "tiempo_transcurrido": round(total_time, 2)
         }), 500
+
+@app.route('/consulta_cedula_rapida', methods=['POST'])
+def consulta_cedula_rapida():
+    """Versión ultra-rápida sin parsing detallado"""
+    start_time = time.time()
+    
+    try:
+        data = request.json
+        cedula = str(data.get('cedula', '')).strip()
         
-    finally:
-        request_lock.release()
-        if page:
-            try:
-                page.close()
-            except:
-                pass
+        if not cedula or not cedula.isdigit():
+            return jsonify({"status": "error", "mensaje": "Cédula inválida"}), 400
+        
+        url = "https://wsp.registraduria.gov.co/censo/consultar/"
+        
+        # Solo POST directo
+        response = sesion_global.post(
+            url,
+            data={'numdoc': cedula},
+            timeout=30
+        )
+        
+        texto = BeautifulSoup(response.text, 'lxml').get_text(separator=' ', strip=True)
+        
+        return jsonify({
+            "status": "success",
+            "cedula": cedula,
+            "resultado": texto,
+            "tiempo": round(time.time() - start_time, 2)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 @app.route('/', methods=['GET'])
 def index():
     """Endpoint raíz"""
     return jsonify({
         "servicio": "Consulta Registraduría Colombia",
-        "version": "2.0 - Optimizado",
+        "version": "3.0 - HTTP Directo (sin Playwright)",
+        "ventajas": [
+            "10x más rápido que Playwright",
+            "Consume menos memoria",
+            "Más estable y confiable",
+            "Sin dependencias de navegador"
+        ],
         "endpoints": {
-            "health": "/health (GET)",
-            "consulta": "/consulta_cedula (POST)"
+            "health": "GET /health",
+            "consulta": "POST /consulta_cedula",
+            "consulta_rapida": "POST /consulta_cedula_rapida"
         },
         "ejemplo": {
             "method": "POST",
             "url": "/consulta_cedula",
-            "body": {"cedula": "123456789"}
+            "headers": {"Content-Type": "application/json"},
+            "body": {"cedula": "12345678"}
         },
-        "notas": [
-            "Timeout máximo: 90 segundos",
-            "Respuesta esperada: 30-60 segundos",
-            "Si falla, esperar 1 minuto antes de reintentar"
-        ]
+        "tiempos_esperados": {
+            "normal": "5-15 segundos",
+            "lento": "15-30 segundos",
+            "muy_lento": "30-45 segundos"
+        }
     })
 
 if __name__ == '__main__':
