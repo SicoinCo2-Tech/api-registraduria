@@ -11,7 +11,6 @@ from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,43 +29,10 @@ jobs_lock = threading.Lock()
 # Almacenar HTML de respuestas para debugging
 html_responses = {}
 
-# Sistema de procesamiento multitarea
-MAX_WORKERS = 15  # Número máximo de consultas simultáneas
-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-
 # Nota: No usamos instancias globales de Playwright porque cada thread necesita su propia instancia
 
 # 2Captcha API Key
 TWOCAPTCHA_API_KEY = os.getenv('TWOCAPTCHA_API_KEY', 'edb59aef0dc3b1176df998d3c56fa304')
-
-# Cargar user agents desde archivo
-USER_AGENTS = []
-
-def load_user_agents():
-    """Carga user agents desde el archivo user_agents.txt"""
-    global USER_AGENTS
-    try:
-        user_agents_file = os.path.join(os.path.dirname(__file__), 'user_agents.txt')
-        if os.path.exists(user_agents_file):
-            with open(user_agents_file, 'r', encoding='utf-8') as f:
-                USER_AGENTS = [line.strip() for line in f if line.strip()]
-            logger.info(f"✅ Cargados {len(USER_AGENTS)} user agents desde user_agents.txt")
-        else:
-            # User agent por defecto si no existe el archivo
-            USER_AGENTS = ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
-            logger.warning("⚠️ Archivo user_agents.txt no encontrado, usando user agent por defecto")
-    except Exception as e:
-        logger.error(f"❌ Error cargando user agents: {e}")
-        USER_AGENTS = ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
-
-def get_random_user_agent():
-    """Retorna un user agent aleatorio"""
-    if USER_AGENTS:
-        return random.choice(USER_AGENTS)
-    return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
-# Cargar user agents al iniciar
-load_user_agents()
 
 def cleanup_old_jobs():
     """Limpia jobs antiguos (>10 minutos)"""
@@ -409,12 +375,8 @@ def process_cedula_job(job_id, cedula_str):
         
         browser, playwright = init_browser()
         
-        # Usar user agent aleatorio para evitar bloqueos
-        user_agent = get_random_user_agent()
-        logger.info(f"🌐 Usando User-Agent: {user_agent[:50]}...")
-        
         context = browser.new_context(
-            user_agent=user_agent,
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             locale='es-CO',
             timezone_id='America/Bogota',
             viewport={'width': 1920, 'height': 1080},
@@ -828,14 +790,9 @@ def process_cedula_job(job_id, cedula_str):
 @app.route('/health', methods=['GET'])
 def health_check():
     cleanup_old_jobs()
-    trabajos_activos = sum(1 for j in jobs.values() if j['status'] in ['pending', 'processing', 'solving_captcha', 'querying_sisben'])
     return jsonify({
         "status": "healthy",
-        "jobs_totales": len(jobs),
-        "jobs_activos": trabajos_activos,
-        "max_workers": MAX_WORKERS,
-        "capacidad_disponible": MAX_WORKERS - trabajos_activos,
-        "user_agents_cargados": len(USER_AGENTS),
+        "jobs_activos": len(jobs),
         "captcha_configured": bool(TWOCAPTCHA_API_KEY),
         "api_key_preview": TWOCAPTCHA_API_KEY[:8] + "..." if TWOCAPTCHA_API_KEY else None,
         "timestamp": time.time()
@@ -843,7 +800,7 @@ def health_check():
 
 @app.route('/consulta_cedula', methods=['POST'])
 def consulta_cedula_async():
-    """Crea un job asíncrono y lo agrega a la cola para procesamiento multitarea"""
+    """Crea un job asíncrono y retorna inmediatamente"""
     try:
         data = request.json
         if not data:
@@ -866,17 +823,15 @@ def consulta_cedula_async():
                 'status': 'pending',
                 'result': None,
                 'created_at': datetime.now(),
-                'updated_at': datetime.now(),
+                'updated_at': datetime.now()
             }
         
-        # Enviar a procesar usando ThreadPoolExecutor (permite múltiples trabajos simultáneos)
-        # El executor maneja automáticamente la concurrencia hasta MAX_WORKERS
-        executor.submit(process_cedula_job, job_id, cedula_str)
+        # Iniciar procesamiento en background
+        thread = threading.Thread(target=process_cedula_job, args=(job_id, cedula_str))
+        thread.daemon = True
+        thread.start()
         
-        # Contar trabajos activos
-        trabajos_activos = sum(1 for j in jobs.values() if j['status'] in ['pending', 'processing', 'solving_captcha', 'querying_sisben'])
-        
-        logger.info(f"🆕 Job {job_id} creado para {cedula_str} (Trabajos activos: {trabajos_activos}/{MAX_WORKERS})")
+        logger.info(f"🆕 Job {job_id} creado para {cedula_str}")
         
         # Retornar inmediatamente
         return jsonify({
@@ -884,8 +839,6 @@ def consulta_cedula_async():
             "job_id": job_id,
             "cedula": cedula_str,
             "mensaje": "Consulta iniciada. El proceso tomará 60-120 segundos (incluye 2 consultas con resolución de CAPTCHA).",
-            "max_concurrent": MAX_WORKERS,
-            "trabajos_activos": sum(1 for j in jobs.values() if j['status'] in ['pending', 'processing', 'solving_captcha', 'querying_sisben']),
             "endpoints": {
                 "status": f"/job/{job_id}",
                 "result": f"/job/{job_id}/result"
@@ -978,24 +931,12 @@ def consultar_html():
 
 @app.route('/', methods=['GET'])
 def index():
-    trabajos_activos = sum(1 for j in jobs.values() if j['status'] in ['pending', 'processing', 'solving_captcha', 'querying_sisben'])
     return jsonify({
         "servicio": "Registraduria API - 2Captcha",
-        "version": "8.0",
-        "caracteristicas": {
-            "multitarea": True,
-            "max_consultas_simultaneas": MAX_WORKERS,
-            "user_agents_aleatorios": len(USER_AGENTS),
-            "resultados_parciales": True
-        },
+        "version": "7.0",
         "captcha_service": "2Captcha",
         "captcha_configured": bool(TWOCAPTCHA_API_KEY),
         "interfaz_web": "GET /consultar",
-        "estado_actual": {
-            "trabajos_activos": trabajos_activos,
-            "trabajos_completados": sum(1 for j in jobs.values() if j['status'] == 'completed'),
-            "max_workers": MAX_WORKERS
-        },
         "endpoints": {
             "crear_consulta": "POST /consulta_cedula",
             "estado_job": "GET /job/{job_id}",
@@ -1005,10 +946,10 @@ def index():
         "ejemplo": {
             "paso_1": "POST /consulta_cedula con {cedula: '1087549965'}",
             "paso_2": "Guardar el job_id retornado",
-            "paso_3": "Esperar 60-120 segundos (SISBEN aparece primero)",
+            "paso_3": "Esperar 30-60 segundos",
             "paso_4": "GET /job/{job_id}/result para obtener datos"
         },
-        "nota": "Cada consulta usa 2 créditos de 2Captcha (uno por cada sitio). Los datos de SISBEN se muestran primero."
+        "nota": "Cada consulta usa 1 crédito de 2Captcha (~$0.003 USD)"
     })
 
 if __name__ == '__main__':
