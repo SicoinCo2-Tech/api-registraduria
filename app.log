@@ -1,0 +1,11 @@
+/Users/faideraltamar/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+2025-12-20 01:21:54,769 - INFO - ✅ Cargados 15 user agents desde user_agents.txt
+ * Serving Flask app 'app'
+ * Debug mode: off
+2025-12-20 01:21:54,779 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:10000
+ * Running on http://192.168.1.2:10000
+2025-12-20 01:21:54,779 - INFO - [33mPress CTRL+C to quit[0m
+2025-12-20 01:22:11,617 - INFO - 127.0.0.1 - - [20/Dec/2025 01:22:11] "GET /health HTTP/1.1" 200 -

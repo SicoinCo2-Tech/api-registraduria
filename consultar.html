@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consulta de Cédula - Registraduría</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .status.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            border-left: 4px solid #1976d2;
+        }
+
+        .status.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-left: 4px solid #2e7d32;
+        }
+
+        .status.error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #c62828;
+        }
+
+        .status.processing {
+            background: #fff3e0;
+            color: #ef6c00;
+            border-left: 4px solid #ef6c00;
+        }
+
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f5f5f5;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+
+        .result-item {
+            margin-bottom: 12px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+        }
+
+        .result-label {
+            font-weight: 600;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .result-value {
+            color: #333;
+            font-size: 16px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 10px;
+            display: none;
+        }
+
+        .progress-bar.show {
+            display: block;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Consulta de Cédula</h1>
+        <p class="subtitle">Registraduría Nacional del Estado Civil</p>
+
+        <form id="consultaForm">
+            <div class="form-group">
+                <label for="cedula">Número de Cédula</label>
+                <input 
+                    type="text" 
+                    id="cedula" 
+                    name="cedula" 
+                    placeholder="Ejemplo: 1123209324" 
+                    required
+                    pattern="[0-9]{6,10}"
+                    maxlength="10"
+                >
+            </div>
+            <button type="submit" id="submitBtn">
+                Consultar Cédula
+            </button>
+        </form>
+
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+
+        <div class="status" id="status"></div>
+
+        <div class="result" id="result">
+            <h2>Resultado de la Consulta</h2>
+            <div id="resultContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // Detectar si estamos abriendo desde file:// o desde el servidor
+        const API_BASE = window.location.protocol === 'file:' 
+            ? 'http://localhost:10000' 
+            : window.location.origin;
+        const form = document.getElementById('consultaForm');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+        const resultContent = document.getElementById('resultContent');
+        const submitBtn = document.getElementById('submitBtn');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            statusDiv.style.display = 'block';
+        }
+
+        function hideStatus() {
+            statusDiv.style.display = 'none';
+        }
+
+        function showResult(data) {
+            if (!data) {
+                showStatus('Error: No se recibieron datos', 'error');
+                resultDiv.classList.remove('show');
+                return;
+            }
+            
+            // Mostrar resultados parciales o completos
+            if ((data.status === 'success' || data.status === 'partial') && data.datos) {
+                const datos = data.datos;
+                const sisben = datos.sisben || {};
+                const registraduria = datos.registraduria || {};
+                
+                // Crear una sola tabla con todos los datos
+                let html = `
+                    <style>
+                        .data-table {
+                            width: 100%;
+                            border-collapse: collapse;
+                            margin-top: 10px;
+                            background: white;
+                            border-radius: 10px;
+                            overflow: hidden;
+                            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                        }
+                        .data-table th {
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            color: white;
+                            padding: 12px 15px;
+                            text-align: left;
+                            font-weight: 600;
+                            font-size: 14px;
+                        }
+                        .data-table td {
+                            padding: 12px 15px;
+                            border-bottom: 1px solid #e0e0e0;
+                            font-size: 14px;
+                        }
+                        .data-table tr:last-child td {
+                            border-bottom: none;
+                        }
+                        .data-table tr:hover {
+                            background-color: #f5f5f5;
+                        }
+                        .data-label {
+                            font-weight: 600;
+                            color: #666;
+                            width: 40%;
+                        }
+                        .data-value {
+                            color: #333;
+                        }
+                    </style>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th colspan="2" style="text-align: center;">📊 Información Completa de la Consulta</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                // Datos SISBEN (primero) - mostrar incluso si es parcial
+                if (sisben && typeof sisben === 'object' && Object.keys(sisben).length > 0 && sisben.status !== 'not_found') {
+                    html += `
+                        <tr style="background-color: #f0f4ff;">
+                            <td colspan="2" style="font-weight: 700; color: #764ba2; padding: 15px; text-align: center;">
+                                👤 SISBEN - Datos Personales
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Nombres</td>
+                            <td class="data-value">${sisben.nombres || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Apellidos</td>
+                            <td class="data-value">${sisben.apellidos || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Tipo de Documento</td>
+                            <td class="data-value">${sisben.tipo_documento || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Número de Documento</td>
+                            <td class="data-value">${sisben.numero_documento || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Municipio (SISBEN)</td>
+                            <td class="data-value">${sisben.municipio || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Departamento (SISBEN)</td>
+                            <td class="data-value">${sisben.departamento || 'N/A'}</td>
+                        </tr>
+                    `;
+                } else if (sisben && sisben.status === 'not_found') {
+                    html += `
+                        <tr style="background-color: #fff3cd;">
+                            <td colspan="2" style="padding: 15px; text-align: center; color: #856404;">
+                                ⚠️ Cédula no encontrada en SISBEN
+                            </td>
+                        </tr>
+                    `;
+                } else {
+                    html += `
+                        <tr style="background-color: #f8d7da;">
+                            <td colspan="2" style="padding: 15px; text-align: center; color: #721c24;">
+                                ❌ Error consultando SISBEN
+                            </td>
+                        </tr>
+                    `;
+                }
+                
+                // Datos Registraduría (segundo) - solo mostrar si están disponibles
+                if (registraduria && typeof registraduria === 'object' && Object.keys(registraduria).length > 0) {
+                    html += `
+                        <tr style="background-color: #f5f0ff;">
+                            <td colspan="2" style="font-weight: 700; color: #667eea; padding: 15px; text-align: center;">
+                                📋 Registraduría Nacional - Lugar de Votación
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">NUIP / Cédula</td>
+                            <td class="data-value">${registraduria.nuip || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Departamento (Registraduría)</td>
+                            <td class="data-value">${registraduria.departamento || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Municipio (Registraduría)</td>
+                            <td class="data-value">${registraduria.municipio || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Puesto de Votación</td>
+                            <td class="data-value">${registraduria.puesto || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Dirección</td>
+                            <td class="data-value">${registraduria.direccion || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td class="data-label">Mesa</td>
+                            <td class="data-value">${registraduria.mesa || 'N/A'}</td>
+                        </tr>
+                    `;
+                } else if (data.status === 'partial') {
+                    html += `
+                        <tr style="background-color: #fff3e0;">
+                            <td colspan="2" style="padding: 15px; text-align: center; color: #ef6c00;">
+                                ⏳ Consultando Registraduría... (esto puede tardar unos segundos)
+                            </td>
+                        </tr>
+                    `;
+                }
+                
+                // Cerrar la tabla
+                html += `
+                    </tbody>
+                </table>
+                `;
+                
+                resultContent.innerHTML = html;
+                resultDiv.classList.add('show');
+            } else if (data.status === 'not_found') {
+                showStatus(data.mensaje || 'Cédula no encontrada en el sistema', 'error');
+                resultDiv.classList.remove('show');
+            } else if (data.status === 'error') {
+                showStatus(data.mensaje || 'Error en la consulta', 'error');
+                resultDiv.classList.remove('show');
+            } else {
+                showStatus('Error desconocido en la respuesta', 'error');
+                resultDiv.classList.remove('show');
+            }
+        }
+
+        async function pollJobResult(jobId) {
+            // Sin límite de intentos - seguir escuchando indefinidamente
+            let attempts = 0;
+            let lastStatus = null;
+            let consecutiveErrors = 0;
+
+            const interval = setInterval(async () => {
+                attempts++;
+                // Mostrar progreso basado en tiempo transcurrido (máximo 95% hasta completar)
+                const progress = Math.min(95, 10 + (attempts * 0.5)); // Empieza en 10%, sube 0.5% por intento
+                progressFill.style.width = progress + '%';
+
+                try {
+                    const response = await fetch(`${API_BASE}/job/${jobId}/result`);
+                    if (!response.ok && response.status !== 202 && response.status !== 200) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    let data = null;
+                    try {
+                        data = await response.json();
+                    } catch (e) {
+                        // Si no hay JSON, puede ser que el servidor esté procesando
+                        if (response.status === 202) {
+                            return; // Continuar polling
+                        }
+                        throw new Error('No se pudo parsear la respuesta');
+                    }
+                    
+                    if (!data && response.status === 200) {
+                        throw new Error('No data received');
+                    }
+
+                    if (response.status === 202) {
+                        // Todavía procesando
+                        let statusText = 'Procesando consulta...';
+                        if (data && data.status === 'querying_sisben') {
+                            statusText = 'Consultando SISBEN (primera consulta)...';
+                        } else if (data && data.status === 'solving_captcha') {
+                            statusText = 'Resolviendo CAPTCHA de Registraduría...';
+                        } else if (data && data.status === 'processing') {
+                            statusText = 'Consultando Registraduría (segunda consulta)...';
+                        } else if (data && data.status === 'sisben_completed') {
+                            statusText = '✅ SISBEN completado. Consultando Registraduría...';
+                        } else if (data && data.mensaje) {
+                            statusText = data.mensaje;
+                        } else {
+                            statusText = `Procesando consulta... (${attempts}s)`;
+                        }
+                        showStatus(statusText, 'processing');
+                    } else if (response.status === 200) {
+                        // Resultado listo (completo o parcial)
+                        if (data.status === 'partial') {
+                            // Mostrar resultado parcial (SISBEN)
+                            showStatus('✅ SISBEN completado. Consultando Registraduría...', 'info');
+                            showResult(data);
+                            // Continuar polling para obtener resultado completo
+                        } else if (data.status === 'success') {
+                            // Resultado completo
+                            clearInterval(interval);
+                            progressFill.style.width = '100%';
+                            progressBar.classList.remove('show');
+                            
+                            showStatus('✅ Consulta completada exitosamente', 'success');
+                            showResult(data);
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = 'Consultar Cédula';
+                        } else {
+                            // Otro tipo de resultado (error, not_found, etc.)
+                            clearInterval(interval);
+                            progressBar.classList.remove('show');
+                            showResult(data);
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = 'Consultar Cédula';
+                        }
+                    } else if (response.status === 404) {
+                        // Job no encontrado - puede ser que expiró, pero continuar intentando un poco más
+                        if (attempts < 60) {
+                            // Esperar al menos 1 minuto antes de dar por perdido
+                            return;
+                        }
+                        clearInterval(interval);
+                        progressBar.classList.remove('show');
+                        showStatus('Job no encontrado o expirado después de 1 minuto', 'error');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Consultar Cédula';
+                    }
+                } catch (error) {
+                    console.error('Error consultando resultado:', error);
+                    consecutiveErrors++;
+                    
+                    // Si hay muchos errores consecutivos, puede ser un problema de red
+                    if (consecutiveErrors >= 10) {
+                        showStatus(`Error de conexión: ${error.message}. Reintentando... (${attempts} intentos)`, 'error');
+                        consecutiveErrors = 0; // Reset para no saturar
+                    }
+                    
+                    // Continuar intentando indefinidamente - no detener el polling
+                }
+                
+                // Reset contador de errores si la petición fue exitosa
+                if (response && (response.ok || response.status === 202 || response.status === 200)) {
+                    consecutiveErrors = 0;
+                }
+                
+                // Mostrar tiempo transcurrido cada 30 segundos
+                if (attempts % 30 === 0 && attempts > 0) {
+                    const minutos = Math.floor(attempts / 60);
+                    const segundos = attempts % 60;
+                    console.log(`⏱️ Tiempo transcurrido: ${minutos}m ${segundos}s - Continuando...`);
+                }
+            }, 1000);
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const cedula = document.getElementById('cedula').value.trim();
+            
+            if (!cedula || cedula.length < 6 || cedula.length > 10) {
+                showStatus('Por favor ingresa una cédula válida (6-10 dígitos)', 'error');
+                return;
+            }
+
+            // Reset UI
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="loading"></span>Enviando consulta...';
+            resultDiv.classList.remove('show');
+            hideStatus();
+            progressBar.classList.add('show');
+            progressFill.style.width = '10%';
+
+            try {
+                showStatus('Enviando consulta a la API...', 'info');
+                
+                const response = await fetch(`${API_BASE}/consulta_cedula`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ cedula: cedula })
+                });
+
+                const data = await response.json();
+
+                if (response.status === 202 && data.job_id) {
+                    showStatus('Consulta aceptada. Procesando...', 'info');
+                    submitBtn.innerHTML = '<span class="loading"></span>Esperando resultado...';
+                    progressFill.style.width = '30%';
+                    
+                    // Iniciar polling del resultado
+                    pollJobResult(data.job_id);
+                } else {
+                    progressBar.classList.remove('show');
+                    showStatus(data.mensaje || 'Error al crear la consulta', 'error');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Consultar Cédula';
+                }
+            } catch (error) {
+                progressBar.classList.remove('show');
+                showStatus('Error de conexión: ' + error.message, 'error');
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Consultar Cédula';
+            }
+        });
+
+        // Permitir solo números en el input
+        document.getElementById('cedula').addEventListener('input', (e) => {
+            e.target.value = e.target.value.replace(/\D/g, '');
+        });
+    </script>
+</body>
+</html>
+
